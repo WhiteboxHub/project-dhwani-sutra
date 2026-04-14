@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dhwani-sutra-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - PROVIDER=${PROVIDER:-mock}
+      - TEST_MODE=${TEST_MODE:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
+      - REDIS_URL=${REDIS_URL:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./backend/app:/app/app:ro
+    networks:
+      - dhwani-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Frontend Sender (served via simple HTTP server)
+  frontend-sender:
+    image: python:3.11-slim
+    container_name: dhwani-sutra-sender
+    command: python -m http.server 8080
+    working_dir: /app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./frontend/sender:/app:ro
+    networks:
+      - dhwani-network
+    restart: unless-stopped
+
+  # Frontend Receiver
+  frontend-receiver:
+    image: python:3.11-slim
+    container_name: dhwani-sutra-receiver
+    command: python -m http.server 8081
+    working_dir: /app
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./frontend/receiver:/app:ro
+    networks:
+      - dhwani-network
+    restart: unless-stopped
+
+  # Redis (optional, for distributed deployments)
+  redis:
+    image: redis:7-alpine
+    container_name: dhwani-sutra-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - dhwani-network
+    restart: unless-stopped
+    profiles:
+      - with-redis
+    command: redis-server --appendonly yes
+
+networks:
+  dhwani-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local

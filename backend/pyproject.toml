@@ -1,0 +1,31 @@
+[project]
+name = "dhwani-sutra"
+version = "0.1.0"
+description = "Production-grade real-time Speech-to-Text streaming platform"
+requires-python = ">=3.11"
+authors = [
+    {name = "Dhwani Sutra Team"}
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --cov=app --cov-report=html --cov-report=term"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W", "I", "N", "UP", "ANN", "S", "B", "A", "COM", "C4", "DTZ", "ISC", "ICN", "PIE", "PT", "Q", "RET", "SIM", "ARG", "PTH", "ERA", "PL", "RUF"]
+ignore = ["ANN101", "ANN102", "S101", "PLR0913"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

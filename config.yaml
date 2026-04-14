@@ -1,0 +1,77 @@
+# Dhwani Sutra Configuration
+
+# STT Provider Selection
+# Options: openai | deepgram | assemblyai | google | mock
+provider: mock
+
+# Audio Settings
+audio:
+  sample_rate: 16000
+  chunk_duration_ms: 250
+  format: opus  # opus | pcm | wav
+  channels: 1   # mono
+
+# Session Management
+session:
+  max_duration_seconds: 14400  # 4 hours
+  idle_timeout_seconds: 3600   # 1 hour
+  max_concurrent: 100
+  cleanup_interval_seconds: 60
+
+# WebSocket Settings
+websocket:
+  ping_interval: 30
+  ping_timeout: 10
+  max_message_size: 1048576  # 1MB
+
+# Logging
+logging:
+  level: info  # debug | info | warning | error
+  format: json
+  include_correlation_id: true
+
+# Redis (for distributed deployments)
+redis:
+  enabled: false
+  url: null  # redis://localhost:6379/0
+  session_ttl: 7200
+
+# Security
+security:
+  require_auth: false
+  allowed_origins:
+    - http://localhost:8080
+    - http://localhost:8081
+    - http://127.0.0.1:8080
+    - http://127.0.0.1:8081
+  rate_limit:
+    enabled: true
+    requests_per_minute: 100
+
+# Provider-Specific Settings
+providers:
+  openai:
+    model: gpt-4o-realtime-preview-2024-10-01
+    voice: alloy
+
+  deepgram:
+    model: nova-2
+    language: en-US
+    smart_format: true
+    punctuate: true
+
+  assemblyai:
+    language_code: en_us
+    punctuate: true
+    format_text: true
+
+  google:
+    language_code: en-US
+    model: latest_long
+    use_enhanced: true
+
+# Monitoring
+monitoring:
+  enabled: true
+  health_check_path: /health
+  metrics_path: /metrics
