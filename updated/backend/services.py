@@ -2,9 +2,14 @@ import io
 import asyncio
 from openai import OpenAI
 from fastapi import WebSocket
+from dotenv import load_dotenv
 
 from prompt import SYSTEM_PROMPT
 import os
+
+# Load environment variables from .env file
+load_dotenv()
+
 # Centralized OpenAI Client Setup here
 key = os.getenv("OPEN_AI_KEY")
 client = OpenAI(api_key=key)
