@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 class AssemblyAISTTProvider(STTProvider):
     """AssemblyAI real-time STT provider."""
 
-    REALTIME_URL = "wss://api.assemblyai.com/v2/realtime/ws"
+    REALTIME_URL = "wss://streaming.assemblyai.com/v3/ws"
 
     def __init__(
         self,
@@ -58,6 +58,7 @@ class AssemblyAISTTProvider(STTProvider):
 
             # Build URL with parameters
             params = {
+                "speech_model":"universal-streaming-english",
                 "sample_rate": "16000",
                 "word_boost": json.dumps([]),
                 "encoding": "pcm_s16le",
@@ -67,6 +68,7 @@ class AssemblyAISTTProvider(STTProvider):
                 f"{self.REALTIME_URL}"
                 f"?sample_rate={params['sample_rate']}"
                 f"&encoding={params['encoding']}"
+                f"&speech_model=universal-streaming-english"
             )
 
             # Connect with API key in header

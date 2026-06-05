@@ -69,7 +69,7 @@ export OPENAI_API_KEY=your_key_here
 
 ```bash
 export PROVIDER=assemblyai
-export ASSEMBLYAI_API_KEY=your_key_here
+export ASSEMBLYAI_API_KEY=2f66722cb1ed4751bc8e2098d8b5e6d7
 ```
 
 ### Google Cloud Speech
