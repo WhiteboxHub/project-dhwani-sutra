@@ -121,7 +121,11 @@ async def websocket_stt(websocket: WebSocket, session_id: str, provider: str = N
                 cleaned_val = await llm_cleaning(history, text_to_clean)
                 print(f"  Cleaned transcript [{session_id}]: {cleaned_val}")
                 if cleaned_val == "[SILENCE]":
-                     cleaned_val = ""
+                    # Preserve original raw text — don't send empty string.
+                    # Sending "" would blank the Latest Transcript box on the frontend
+                    # and leave listener segments empty. Keep raw text so the segment
+                    # is marked "cleaned" but still displays meaningful content.
+                    cleaned_val = text_to_clean
                 
                 msg_cleaned = {
                     "type": "transcript_cleaned",
