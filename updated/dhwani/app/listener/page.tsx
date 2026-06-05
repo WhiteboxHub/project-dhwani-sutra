@@ -64,8 +64,13 @@ export default function Listener() {
           }, 1000);
 
         } else if (data.type === "transcript_cleaned") {
-           setTranscripts((prev) => 
-             prev.map(t => t.id === data.id ? { ...t, text: data.text, isCleaned: true } : t)
+           setTranscripts((prev) =>
+             prev.map(t =>
+               t.id === data.id
+                 // Fall back to existing text if cleaned result is empty
+                 ? { ...t, text: data.text || t.text, isCleaned: true }
+                 : t
+             )
            );
            setStatus("✨ Transcribed (Cleaned)");
 

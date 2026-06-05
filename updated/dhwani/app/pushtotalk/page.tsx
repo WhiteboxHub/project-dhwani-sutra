@@ -43,9 +43,9 @@ export default function PushToTalk() {
     }
 
 
-    // return () => {
-    //   cleanupAll();
-    // };
+    return () => {
+      cleanupAll();
+    };
   }, []);
 
   const Insert_key = () => {
@@ -64,37 +64,37 @@ export default function PushToTalk() {
   }
   
 
-  // const cleanupAll = () => {
-  //   if (recordingIntervalRef.current) {
-  //     clearInterval(recordingIntervalRef.current);
-  //     recordingIntervalRef.current = null;
-  //   }
+  const cleanupAll = () => {
+    if (recordingIntervalRef.current) {
+      clearInterval(recordingIntervalRef.current);
+      recordingIntervalRef.current = null;
+    }
 
-  //   if (
-  //     mediaRecorderRef.current &&
-  //     mediaRecorderRef.current.state === "recording"
-  //   ) {
-  //     mediaRecorderRef.current.stop();
-  //   }
+    if (
+      mediaRecorderRef.current &&
+      mediaRecorderRef.current.state === "recording"
+    ) {
+      mediaRecorderRef.current.stop();
+    }
 
-  //   mediaRecorderRef.current = null;
+    mediaRecorderRef.current = null;
 
-  //   if (streamRef.current) {
-  //     streamRef.current.getTracks().forEach((track) => track.stop());
-  //     streamRef.current = null;
-  //   }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
 
-  //   if (socketRef.current) {
-  //     if (
-  //       socketRef.current.readyState === WebSocket.OPEN ||
-  //       socketRef.current.readyState === WebSocket.CONNECTING
-  //     ) {
-  //       socketRef.current.close();
-  //     }
+    if (socketRef.current) {
+      if (
+        socketRef.current.readyState === WebSocket.OPEN ||
+        socketRef.current.readyState === WebSocket.CONNECTING
+      ) {
+        socketRef.current.close();
+      }
 
-  //     socketRef.current = null;
-  //   }
-  // };
+      socketRef.current = null;
+    }
+  };
 
   const clearKeys = () => {
     localStorage.removeItem("openai_key");
@@ -113,6 +113,11 @@ export default function PushToTalk() {
     if (!streamRef.current || !socketRef.current) return;
 
     if (socketRef.current.readyState !== WebSocket.OPEN) return;
+
+    // Guard: if stream tracks have been stopped (e.g. cleanup ran), bail out
+    // This prevents the MediaRecorder NotSupportedError crash
+    const tracks = streamRef.current.getTracks();
+    if (tracks.length === 0 || tracks.some((t) => t.readyState === "ended")) return;
 
     const recorder = new MediaRecorder(streamRef.current, {
       mimeType: "audio/webm;codecs=opus",
@@ -237,7 +242,9 @@ export default function PushToTalk() {
               )
             );
 
-            setLatestText(data.text);
+            // Only update latestText if the cleaned result is non-empty
+            // (empty means the backend flagged it as silence/hallucination)
+            if (data.text) setLatestText(data.text);
             setStatus("Transcript Cleaned");
           }
 
@@ -269,7 +276,7 @@ export default function PushToTalk() {
   };
 
   const stopRecording = () => {
-    // cleanupAll();
+    cleanupAll();
     setIsRecording(false);
     setStatus("Stopped");
   };
