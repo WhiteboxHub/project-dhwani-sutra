@@ -1,5 +1,6 @@
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 import uvicorn
 from dotenv import load_dotenv
@@ -9,8 +10,24 @@ from services import llm_cleaning
 from providers import get_stt_provider
 import os
 
-app = FastAPI()
 load_dotenv()
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://192.168.0.205:3001",
+        "http://192.168.0.205:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 STT_PROVIDER= os.getenv("STT_PROVIDER", "openai").lower()
 
@@ -63,7 +80,13 @@ async def websocket_listen(websocket: WebSocket, session_id: str):
 
 
 @app.websocket("/ws/stt/{session_id}")
-async def websocket_stt(websocket: WebSocket, session_id: str, provider: str = None):
+async def websocket_stt(
+    websocket: WebSocket,
+    session_id: str,
+    provider: str = None,
+    openai_key: str = None,
+    deepgram_key: str = None,
+):
     await websocket.accept()
 
     audio_queue = asyncio.Queue()
@@ -87,7 +110,11 @@ async def websocket_stt(websocket: WebSocket, session_id: str, provider: str = N
             await audio_queue.put(None)
 
     active_provider = provider or os.getenv("STT_PROVIDER", "openai").lower()
-    stt_provider_instance = get_stt_provider(active_provider)
+    stt_provider_instance = get_stt_provider(
+        active_provider,
+        openai_key=openai_key,
+        deepgram_key=deepgram_key,
+    )
 
     async def handler_callback(raw_text: str):
         nonlocal raw_transcript_history
@@ -126,6 +153,13 @@ async def websocket_stt(websocket: WebSocket, session_id: str, provider: str = N
                     # and leave listener segments empty. Keep raw text so the segment
                     # is marked "cleaned" but still displays meaningful content.
                     cleaned_val = text_to_clean
+                
+                # Post-processing to fix punctuation artifacts from chunk-based transcription
+                if cleaned_val and cleaned_val != "[SILENCE]":
+                    cleaned_val = cleaned_val.replace(". and", ", and")
+                    cleaned_val = cleaned_val.replace(". And", ", and")
+                    cleaned_val = cleaned_val.replace(" .", ".")
+                    cleaned_val = cleaned_val.replace(" ,", ",")
                 
                 msg_cleaned = {
                     "type": "transcript_cleaned",
