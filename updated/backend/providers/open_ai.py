@@ -6,8 +6,8 @@ from utils import is_hallucination, is_valid_webm
 from .base import STTProvider
 
 class OpenAIProvider(STTProvider):
-    def __init__(self):
-        key = os.getenv("OPEN_AI_KEY")
+    def __init__(self, api_key: str = None):
+        key = api_key or os.getenv("OPEN_AI_KEY")
         self.client = OpenAI(api_key=key)
 
     async def process_audio_stream(
@@ -54,6 +54,7 @@ class OpenAIProvider(STTProvider):
                 file=audio_file,
                 response_format="text",
                 language="en",
+                prompt="LangChain, LangGraph, MilvusDB, BM25, Agentic AI, RAG, Prometheus, Grafana, AWS CloudWatch, Docker, Kubernetes.",
                 timeout=10
             )
 

@@ -18,7 +18,7 @@ export default function PushToTalk() {
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [latestText, setLatestText] = useState("");
   const [status, setStatus] = useState("Ready");
-  const [provider, setProvider] = useState<"openai" | "deepgram">("openai");
+  const [provider, setProvider] = useState<"openai" | "deepgram">("deepgram");
   const [sessionId, setSessionId] = useState("");
 
   const [openAiKey, setOpenAiKey] = useState("");
@@ -26,7 +26,7 @@ export default function PushToTalk() {
   const [isKeysInserted, setIsKeysInserted] = useState(false);
   const [savedOpenAiKey, setSavedOpenAiKey] = useState("");
   const [savedDeepgramKey, setSavedDeepgramKey] = useState("");
-  const CHUNK_DURATION = 1000;
+  const CHUNK_DURATION = 2000; // 2s — good balance for Deepgram streaming
 
   useEffect(() => {
     setSessionId(Math.random().toString(36).substring(2, 8).toUpperCase());
@@ -62,7 +62,7 @@ export default function PushToTalk() {
     setDeepgramKey("");
     toast.success("Keys Inserted");
   }
-  
+
 
   const cleanupAll = () => {
     if (recordingIntervalRef.current) {

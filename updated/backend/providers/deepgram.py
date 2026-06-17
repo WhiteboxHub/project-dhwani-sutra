@@ -1,13 +1,16 @@
 import asyncio
+import os
 import threading
 from deepgram import DeepgramClient
-from deepgram.core.events import EventType
+from deepgram.listen.v1.socket_client import EventType
 from .base import STTProvider
 
+
 class DeepgramProvider(STTProvider):
-    def __init__(self):
-        # DeepgramClient will automatically use DEEPGRAM_API_KEY from env
-        self.deepgram = DeepgramClient()
+    def __init__(self, api_key: str = None):
+        key = api_key or os.getenv("DEEPGRAM_API_KEY")
+        # v7.3.1: api_key must be a keyword argument
+        self.deepgram = DeepgramClient(api_key=key)
 
     async def process_audio_stream(
         self,
@@ -15,22 +18,31 @@ class DeepgramProvider(STTProvider):
         handler_callback
     ):
         loop = asyncio.get_running_loop()
-        
-        try:
-            # Create a websocket connection to Deepgram
-            with self.deepgram.listen.v1.connect(model="nova-3") as connection:
 
-                def on_message(*args, **kwargs) -> None:
-                    # Depending on python SDK version, signature can be `on_message(self, message, **kwargs)` or `on_message(message)`
+        try:
+            # v7.3.1: connect() is a context manager returning V1SocketClient
+            with self.deepgram.listen.v1.connect(
+                model="nova-3",
+                punctuate=True,
+                interim_results=False,
+                endpointing=500,
+                language="en",
+                keyterm=["LangChain:3", "LangGraph:3", "land graph:2", "Landra:2", "MilvusDB:3", "BM25:3", "Agentic AI:3", "Agentic:3", "RAG:3", "Prometheus:2", "Grafana:2", "CloudWatch:2"]
+            ) as connection:
+
+                def on_message(*args, **kwargs):
+                    # Handler receives (self, message) or just (message,)
                     message = args[1] if len(args) > 1 else args[0]
-                    
-                    if hasattr(message, 'channel') and hasattr(message.channel, 'alternatives'):
-                        sentence = message.channel.alternatives[0].transcript
-                        if len(sentence) == 0:
-                            return
-                        print(f"Deepgram raw text: {sentence}")
-                        # Execute the async handler callback
-                        asyncio.run_coroutine_threadsafe(handler_callback(sentence), loop)
+                    try:
+                        if hasattr(message, "channel") and hasattr(message.channel, "alternatives"):
+                            sentence = message.channel.alternatives[0].transcript
+                            if sentence and sentence.strip():
+                                print(f"Deepgram raw text: {sentence}")
+                                asyncio.run_coroutine_threadsafe(
+                                    handler_callback(sentence), loop
+                                )
+                    except Exception as e:
+                        print(f"Deepgram message parse error: {e}")
 
                 def on_error(*args, **kwargs):
                     error = args[1] if len(args) > 1 else args[0]
@@ -39,32 +51,27 @@ class DeepgramProvider(STTProvider):
                 connection.on(EventType.MESSAGE, on_message)
                 connection.on(EventType.ERROR, on_error)
 
-                # Thread logic based on Deepgram doc snippet
-                def listening_thread():
-                    try:
-                        connection.start_listening()
-                    except Exception as e:
-                        print(f"Error in listening thread: {e}")
-
-                listen_thread = threading.Thread(target=listening_thread)
+                # start_listening() is blocking — run in a thread
+                listen_thread = threading.Thread(
+                    target=connection.start_listening, daemon=True
+                )
                 listen_thread.start()
 
-                # Process the audio queue and stream data
+                # Stream audio chunks to Deepgram
                 while True:
                     try:
                         chunk = await audio_queue.get()
-                        
-                        if chunk is None: # EOF
+
+                        if chunk is None:  # EOF / sender disconnected
                             break
-                            
-                        # WebM chunk to Deepgram
+
                         connection.send_media(chunk)
 
                     except Exception as e:
-                        print(f"Error in Deepgram data stream: {e}")
+                        print(f"Error sending audio to Deepgram: {e}")
                         break
-                        
-                listen_thread.join(timeout=5.0)
+
+                listen_thread.join(timeout=3.0)
                 print("Deepgram streaming finished.")
 
         except Exception as e:
