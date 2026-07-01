@@ -27,7 +27,7 @@ class DeepgramProvider(STTProvider):
                 interim_results=False,
                 endpointing=500,
                 language="en",
-                keyterm=["LangChain:3", "LangGraph:3", "land graph:2", "Landra:2", "MilvusDB:3", "BM25:3", "Agentic AI:3", "Agentic:3", "RAG:3", "Prometheus:2", "Grafana:2", "CloudWatch:2"]
+                keyterm=["LangChain", "LangGraph", "land graph", "Landra", "MilvusDB", "BM25", "Agentic AI", "Agentic", "RAG", "Prometheus", "Grafana", "CloudWatch"]
             ) as connection:
 
                 def on_message(*args, **kwargs):
