@@ -4,32 +4,36 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 import uvicorn
 from dotenv import load_dotenv
+import os
+import uuid
+import json
 
 from utils import is_valid_webm, safe_send
-from services import llm_cleaning
+from services import normalize_text, should_invoke_gpt, llm_cleaning, validate_similarity
 from providers import get_stt_provider
-import os
+from latency_logger import latency_tracker
 
 load_dotenv()
 
 app = FastAPI()
 
+allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "*")
+if allowed_origins_raw == "*":
+    allow_origins = ["*"]
+    allow_credentials = False
+else:
+    allow_origins = [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+    allow_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://192.168.0.205:3001",
-        "http://192.168.0.205:3000",
-    ],
-    allow_credentials=True,
+    allow_origins=allow_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-STT_PROVIDER= os.getenv("STT_PROVIDER", "openai").lower()
+STT_PROVIDER = os.getenv("STT_PROVIDER", "openai").lower()
 
 # Manage session broadcasts
 class ConnectionManager:
@@ -70,8 +74,19 @@ async def websocket_listen(websocket: WebSocket, session_id: str):
     await manager.connect_listener(websocket, session_id)
     try:
         while True:
-            # Keep the connection alive
+            # Process incoming telemetry messages from the listener frontend
             data = await websocket.receive_text()
+            try:
+                payload = json.loads(data)
+                if payload.get("type") == "telemetry":
+                    segment_id = payload.get("id")
+                    listener_received = payload.get("listener_received_time")
+                    rendered = payload.get("rendered_time")
+                    latency_tracker.process_listener_telemetry(
+                        session_id, segment_id, listener_received, rendered
+                    )
+            except Exception:
+                pass
     except WebSocketDisconnect:
         manager.disconnect_listener(websocket, session_id)
     except Exception as e:
@@ -88,23 +103,53 @@ async def websocket_stt(
     deepgram_key: str = None,
 ):
     await websocket.accept()
+    latency_tracker.start_session(session_id)
 
     audio_queue = asyncio.Queue()
     is_connected = True
     
     # Store ORIGINAL transcripts for context, not cleaned versions
     raw_transcript_history = ""
+
+    # Track active metadata for current audio chunk
+    active_metadata = {
+        "chunk_index": 0,
+        "audio_created_time": 0.0,
+        "audio_sent_time": 0.0,
+        "backend_received_time": 0.0,
+        "deepgram_forwarded_time": 0.0,
+    }
+
+    # Tracking the segment ID for the active/running stream
+    active_segment_id = None
     
     async def receive_audio():
         nonlocal is_connected
+        nonlocal active_metadata
         try:
             while True:
-                data = await websocket.receive_bytes()
-                await audio_queue.put(data)
+                msg = await websocket.receive()
+                if "text" in msg:
+                    try:
+                        data = json.loads(msg["text"])
+                        if data.get("type") == "chunk_metadata":
+                            active_metadata.update({
+                                "chunk_index": data.get("chunk_index", 0),
+                                "audio_created_time": data.get("audio_created_time", 0.0),
+                                "audio_sent_time": data.get("audio_sent_time", 0.0),
+                            })
+                    except Exception as e:
+                        latency_tracker.log_error(session_id, "Receive Metadata JSON", str(e), active_metadata.get("chunk_index", 0))
+                elif "bytes" in msg:
+                    recv_time = latency_tracker.get_timestamp_ms()
+                    active_metadata["backend_received_time"] = recv_time
+                    audio_data = msg["bytes"]
+                    await audio_queue.put((audio_data, active_metadata.copy()))
         except WebSocketDisconnect:
             print(f"🔌 Sender disconnected from session {session_id}")
         except Exception as e:
             print(f"  Receive error: {e}")
+            latency_tracker.log_error(session_id, "Receive Audio Loop", str(e), active_metadata.get("chunk_index", 0))
         finally:
             is_connected = False
             await audio_queue.put(None)
@@ -116,72 +161,120 @@ async def websocket_stt(
         deepgram_key=deepgram_key,
     )
 
-    async def handler_callback(raw_text: str):
+    async def handler_callback(raw_text: str, is_final: bool, chunk_metadata: dict = None, dg_response_time: float = None):
         nonlocal raw_transcript_history
+        nonlocal active_segment_id
         if not raw_text:
             return
 
-        print(f"  Raw transcript [{session_id}]: {raw_text}")
+        # Ensure we have a segment ID tracking this sentence
+        if not active_segment_id:
+            active_segment_id = str(uuid.uuid4())
 
-        # Update context with RAW transcript, not cleaned
-        # This prevents feedback loop where cleaned text influences future cleaning
-        raw_transcript_history = (raw_transcript_history + " " + raw_text)[-2000:]
+        segment_id = active_segment_id
 
-        import uuid
-        segment_id = str(uuid.uuid4())
+        # Fallbacks for metadata
+        if not chunk_metadata:
+            chunk_metadata = active_metadata.copy()
+        if not dg_response_time:
+            dg_response_time = latency_tracker.get_timestamp_ms()
 
+        # Send raw text immediately (either interim or final raw)
         msg_raw = {
             "type": "transcript_raw",
             "id": segment_id,
-            "text": raw_text
+            "text": raw_text,
+            "is_final": is_final
         }
 
         # Send raw text to front-end sender
         await safe_send(websocket, msg_raw)
-
         # Broadcast to any active listeners
         await manager.broadcast_to_session(session_id, msg_raw)
 
-        # Define background task for cleaning
-        async def clean_and_send(text_to_clean: str, history: str, sid: str):
-            try:
-                cleaned_val = await llm_cleaning(history, text_to_clean)
-                print(f"  Cleaned transcript [{session_id}]: {cleaned_val}")
-                if cleaned_val == "[SILENCE]":
-                    # Preserve original raw text — don't send empty string.
-                    # Sending "" would blank the Latest Transcript box on the frontend
-                    # and leave listener segments empty. Keep raw text so the segment
-                    # is marked "cleaned" but still displays meaningful content.
-                    cleaned_val = text_to_clean
-                
-                # Post-processing to fix punctuation artifacts from chunk-based transcription
-                if cleaned_val and cleaned_val != "[SILENCE]":
-                    cleaned_val = cleaned_val.replace(". and", ", and")
-                    cleaned_val = cleaned_val.replace(". And", ", and")
-                    cleaned_val = cleaned_val.replace(" .", ".")
-                    cleaned_val = cleaned_val.replace(" ,", ",")
-                
-                msg_cleaned = {
-                    "type": "transcript_cleaned",
-                    "id": sid,
-                    "text": cleaned_val
-                }
-                
-                # Send to sender
-                await safe_send(websocket, msg_cleaned)
-                # Broadcast to listener
-                await manager.broadcast_to_session(session_id, msg_cleaned)
-            except Exception as e:
-                print(f"  Error during LLM clean background task: {e}")
+        # Pipeline 2: Finalization Pipeline (only on is_final=True)
+        if is_final:
+            print(f"  Final raw transcript [{session_id}]: {raw_text}")
+            
+            # Context window update
+            raw_transcript_history = (raw_transcript_history + " " + raw_text)[-2000:]
+            
+            # Record start timestamps for instrumentation
+            latency_tracker.record_segment_start(segment_id, chunk_metadata, dg_response_time)
 
-        # Kick off background cleaning task (does not block websocket)
-        asyncio.create_task(clean_and_send(raw_text, raw_transcript_history, segment_id))
+            # Reset active segment ID for the next sentence
+            active_segment_id = None
+
+            async def finalize_and_send(text_to_finalize: str, history: str, sid: str):
+                try:
+                    # 1. Technical Dictionary Normalization
+                    dict_start = latency_tracker.get_timestamp_ms()
+                    normalized_val, dict_modified = normalize_text(text_to_finalize)
+                    dict_end = latency_tracker.get_timestamp_ms()
+
+                    # 2. Validation Layer / Decision Engine
+                    val_start = latency_tracker.get_timestamp_ms()
+                    gpt_needed = should_invoke_gpt(text_to_finalize, normalized_val)
+                    val_end = latency_tracker.get_timestamp_ms()
+
+                    gpt_started = 0.0
+                    gpt_completed = 0.0
+                    final_val = normalized_val
+
+                    # 3. Optional GPT Connection
+                    if gpt_needed:
+                        gpt_started = latency_tracker.get_timestamp_ms()
+                        gpt_cleaned = await llm_cleaning(history, normalized_val)
+                        gpt_completed = latency_tracker.get_timestamp_ms()
+
+                        if gpt_cleaned == "[SILENCE]":
+                            final_val = text_to_finalize
+                        else:
+                            # 4. Similarity Validation
+                            if validate_similarity(normalized_val, gpt_cleaned):
+                                final_val = gpt_cleaned
+                            else:
+                                print(f"⚠️ Similarity check failed. Using normalized text instead of GPT.")
+                                final_val = normalized_val
+                    else:
+                        print(f"⚡ Skipping GPT call (normalized text is clean and matches criteria)")
+
+                    # Clean grammatical artifacts if needed
+                    if final_val and final_val != "[SILENCE]":
+                        final_val = final_val.replace(". and", ", and")
+                        final_val = final_val.replace(". And", ", and")
+                        final_val = final_val.replace(" .", ".")
+                        final_val = final_val.replace(" ,", ",")
+
+                    msg_cleaned = {
+                        "type": "transcript_cleaned",
+                        "id": sid,
+                        "text": final_val
+                    }
+
+                    # Send to clients
+                    await safe_send(websocket, msg_cleaned)
+                    await manager.broadcast_to_session(session_id, msg_cleaned)
+
+                    # Log latency telemetry
+                    broadcast_sent = latency_tracker.get_timestamp_ms()
+                    latency_tracker.record_pipeline_metrics(
+                        sid, dict_start, dict_end, val_start, val_end,
+                        gpt_started, gpt_completed, gpt_needed, broadcast_sent
+                    )
+
+                except Exception as e:
+                    print(f"  Error in finalization pipeline: {e}")
+                    latency_tracker.log_error(session_id, "Finalization Pipeline", str(e), chunk_metadata.get("chunk_index", 0))
+
+            asyncio.create_task(finalize_and_send(raw_text, raw_transcript_history, segment_id))
 
     async def run_provider():
         try:
             await stt_provider_instance.process_audio_stream(audio_queue, handler_callback)
         except Exception as e:
             print(f"  Provider error: {e}")
+            latency_tracker.log_error(session_id, "STT Provider Loop", str(e), active_metadata.get("chunk_index", 0))
 
     # Create tasks for receiving and processing
     receive_task = asyncio.create_task(receive_audio())
@@ -225,6 +318,7 @@ async def websocket_stt(
             print(f"  Error during websocket close: {e}")
 
         print("  WebSocket safely closed")
+        latency_tracker.end_session(session_id)
 
 
 if __name__ == "__main__":
