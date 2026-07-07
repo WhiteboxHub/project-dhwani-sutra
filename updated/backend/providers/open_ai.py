@@ -4,6 +4,7 @@ import os
 from openai import OpenAI
 from utils import is_hallucination, is_valid_webm
 from .base import STTProvider
+from latency_logger import latency_tracker
 
 class OpenAIProvider(STTProvider):
     def __init__(self, api_key: str = None):
@@ -18,10 +19,12 @@ class OpenAIProvider(STTProvider):
         while True:
             try:
                 # Wait for next audio chunk
-                chunk = await audio_queue.get()
+                item = await audio_queue.get()
 
-                if chunk is None:
+                if item is None:
                     break  # Disconnected
+
+                chunk, metadata = item
 
                 # Skip tiny chunks (likely silence or noise)
                 if len(chunk) < 500:
@@ -32,10 +35,15 @@ class OpenAIProvider(STTProvider):
                     print(f"  Invalid WebM chunk (missing EBML header): {len(chunk)} bytes")
                     continue
 
+                # Record OpenAI forward time
+                metadata["deepgram_forwarded_time"] = latency_tracker.get_timestamp_ms()
+
                 # Transcribe the audio
                 raw_text = await self._transcribe_audio(chunk)
                 if raw_text:
-                    await handler_callback(raw_text)
+                    dg_response_time = latency_tracker.get_timestamp_ms()
+                    # OpenAI chunks are always fully finalized segments (is_final=True)
+                    await handler_callback(raw_text, True, metadata, dg_response_time)
 
             except Exception as e:
                 print(f"  OpenAI provider error: {e}")
@@ -47,7 +55,6 @@ class OpenAIProvider(STTProvider):
             audio_file = io.BytesIO(audio_data)
             audio_file.name = "audio.webm"
 
-            # Run blocking API call in thread pool
             response = await asyncio.to_thread(
                 self.client.audio.transcriptions.create,
                 model="whisper-1",

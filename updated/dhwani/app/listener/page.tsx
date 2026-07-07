@@ -9,10 +9,37 @@ export default function Listener() {
   const [transcripts, setTranscripts] = useState<any[]>([]);
   
   const socketRef = useRef<WebSocket | null>(null);
+  const lastReceivedRef = useRef<{ id: string, type: string, listenerReceived: number } | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Report rendering latency back to backend
+  useEffect(() => {
+    if (lastReceivedRef.current) {
+      const { id, type, listenerReceived } = lastReceivedRef.current;
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const renderedTime = performance.timeOrigin + performance.now();
+          if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+            socketRef.current.send(JSON.stringify({
+              type: "telemetry",
+              id: id,
+              is_cleaned: type === "transcript_cleaned",
+              listener_received_time: listenerReceived,
+              rendered_time: renderedTime
+            }));
+          }
+        }, 0);
+      });
+      lastReceivedRef.current = null;
+    }
+  }, [transcripts]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+      }
       if (socketRef.current) {
         socketRef.current.close();
       }
@@ -26,6 +53,10 @@ export default function Listener() {
     }
 
     if (isConnected) {
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
       if (socketRef.current) {
         socketRef.current.close();
       }
@@ -35,10 +66,12 @@ export default function Listener() {
     }
 
     setStatus("Connecting...");
-    
-    // Connect to the listener WebSocket endpoint
-    // Adjust the URL if your backend endpoint differs
-    const wsUrl = `ws://127.0.0.1:8000/ws/listen/${sessionId.trim()}`;
+
+    const backendBase = process.env.NEXT_PUBLIC_BACKEND_URL || "127.0.0.1:8000";
+    const protocol = backendBase.includes("://") ? (backendBase.startsWith("https") ? "wss" : "ws") : "ws";
+    const rawHost = backendBase.replace(/^https?:\/\//, "").replace(/^wss?:\/\//, "");
+
+    const wsUrl = `${protocol}://${rawHost}/ws/listen/${sessionId.trim()}`;
     const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
 
@@ -47,45 +80,67 @@ export default function Listener() {
       setStatus("Connected - Listening...");
       setIsConnected(true);
       setTranscripts([]);
+
+      // Start ping heartbeat every 30 seconds to keep Cloud Run WebSocket alive
+      heartbeatIntervalRef.current = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 30000);
     };
 
     socket.onmessage = (event) => {
+      const listenerReceived = performance.timeOrigin + performance.now();
       try {
         const data = JSON.parse(event.data);
 
         if (data.type === "transcript_raw") {
-          setTranscripts((prev) => [...prev, { id: data.id, text: data.text, isCleaned: false }]);
-          setStatus("✅ Transcribed (Raw)");
-          
-          setTimeout(() => {
-            setStatus((currentStatus) => 
-              currentStatus.startsWith("✅ Transcribed") ? "Connected - Listening..." : currentStatus
-            );
-          }, 1000);
+          setTranscripts((prev) => {
+            const existingIdx = prev.findIndex((item) => item.id === data.id);
+            if (existingIdx !== -1) {
+              const updated = [...prev];
+              updated[existingIdx] = {
+                ...updated[existingIdx],
+                text: data.text,
+                isFinal: data.is_final
+              };
+              return updated;
+            } else {
+              return [
+                ...prev,
+                { id: data.id, text: data.text, isCleaned: false, isFinal: data.is_final }
+              ];
+            }
+          });
+
+          lastReceivedRef.current = {
+            id: data.id,
+            type: "transcript_raw",
+            listenerReceived: listenerReceived
+          };
+          setStatus(data.is_final ? "✅ Final Transcript" : "⚡ Streaming...");
 
         } else if (data.type === "transcript_cleaned") {
            setTranscripts((prev) =>
              prev.map(t =>
                t.id === data.id
-                 // Fall back to existing text if cleaned result is empty
                  ? { ...t, text: data.text || t.text, isCleaned: true }
                  : t
              )
            );
-           setStatus("✨ Transcribed (Cleaned)");
-
-           setTimeout(() => {
-            setStatus((currentStatus) => 
-              currentStatus.startsWith("✨ Transcribed") ? "Connected - Listening..." : currentStatus
-            );
-          }, 1000);
+           lastReceivedRef.current = {
+             id: data.id,
+             type: "transcript_cleaned",
+             listenerReceived: listenerReceived
+           };
+           setStatus("✨ Cleaned Transcript");
 
         } else if (data.type === "error") {
           console.error("❌ Backend error:", data.message);
           setStatus(`⚠️ Error: ${data.message || 'Check console'}`);
         }
       } catch (err) {
-        console.error("❌ Invalid WebSocket message:", err);
+        // Ignore parsing errors for pings/control frames
       }
     };
 
@@ -97,6 +152,10 @@ export default function Listener() {
 
     socket.onclose = (event) => {
       console.log("🔌 WebSocket closed:", event.code, event.reason);
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
       setStatus("Disconnected");
       setIsConnected(false);
     };
@@ -213,7 +272,16 @@ export default function Listener() {
             <div className="bg-gray-900/80 p-5 rounded-lg max-h-[350px] overflow-y-auto border border-gray-700 shadow-inner scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-transparent">
               <p className="text-lg text-gray-100 leading-relaxed">
                 {transcripts.map((t, idx) => (
-                  <span key={t.id || idx} className={t.isCleaned ? "transition-colors duration-300" : "text-gray-400 italic font-light animate-pulse"}>
+                  <span
+                    key={t.id || idx}
+                    className={
+                      t.isCleaned
+                        ? "transition-colors duration-300 text-gray-100"
+                        : t.isFinal
+                        ? "text-gray-300 font-medium"
+                        : "text-gray-500 italic animate-pulse"
+                    }
+                  >
                     {t.text}{" "}
                   </span>
                 ))}
@@ -234,7 +302,9 @@ export default function Listener() {
                     className={`text-base p-4 rounded-lg border-l-4 leading-relaxed break-words whitespace-pre-wrap transition-all shadow-sm ${
                       t.isCleaned 
                         ? 'text-gray-200 bg-gray-700/40 border-blue-500/50 hover:bg-gray-700/60' 
-                        : 'text-gray-400 bg-gray-800/60 border-gray-500/50 italic'
+                        : t.isFinal
+                        ? 'text-gray-300 bg-gray-800/40 border-gray-500/50'
+                        : 'text-gray-500 bg-gray-800/20 border-gray-600/30 italic animate-pulse'
                     }`}
                   >
                     <div className="flex items-center gap-2 mb-1">
@@ -244,7 +314,7 @@ export default function Listener() {
                       {!t.isCleaned && (
                         <span className="inline-flex items-center gap-1 text-xs text-yellow-500 bg-yellow-500/10 px-1.5 py-0.5 rounded-full">
                           <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                          Enhancing
+                          {t.isFinal ? "Enhancing" : "Streaming"}
                         </span>
                       )}
                     </div>

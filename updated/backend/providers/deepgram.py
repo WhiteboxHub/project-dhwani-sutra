@@ -4,13 +4,15 @@ import threading
 from deepgram import DeepgramClient
 from deepgram.listen.v1.socket_client import EventType
 from .base import STTProvider
+from latency_logger import latency_tracker
+
 
 
 class DeepgramProvider(STTProvider):
     def __init__(self, api_key: str = None):
         key = api_key or os.getenv("DEEPGRAM_API_KEY")
-        # v7.3.1: api_key must be a keyword argument
         self.deepgram = DeepgramClient(api_key=key)
+        self.latest_chunk_metadata = {}
 
     async def process_audio_stream(
         self,
@@ -20,26 +22,31 @@ class DeepgramProvider(STTProvider):
         loop = asyncio.get_running_loop()
 
         try:
-            # v7.3.1: connect() is a context manager returning V1SocketClient
             with self.deepgram.listen.v1.connect(
                 model="nova-3",
                 punctuate=True,
-                interim_results=False,
+                interim_results=True,
                 endpointing=500,
                 language="en",
                 keyterm=["LangChain", "LangGraph", "land graph", "Landra", "MilvusDB", "BM25", "Agentic AI", "Agentic", "RAG", "Prometheus", "Grafana", "CloudWatch"]
             ) as connection:
 
                 def on_message(*args, **kwargs):
-                    # Handler receives (self, message) or just (message,)
                     message = args[1] if len(args) > 1 else args[0]
                     try:
                         if hasattr(message, "channel") and hasattr(message.channel, "alternatives"):
                             sentence = message.channel.alternatives[0].transcript
                             if sentence and sentence.strip():
-                                print(f"Deepgram raw text: {sentence}")
+                                is_final = getattr(message, "is_final", False)
+                                # speech_final is also a useful fallback for end-of-utterance detection
+                                speech_final = getattr(message, "speech_final", False)
+                                is_segment_final = is_final or speech_final
+                                
+                                print(f"Deepgram transcript (final={is_segment_final}): {sentence}")
+                                dg_response_time = latency_tracker.get_timestamp_ms()
+                                meta_copy = self.latest_chunk_metadata.copy()
                                 asyncio.run_coroutine_threadsafe(
-                                    handler_callback(sentence), loop
+                                    handler_callback(sentence, is_segment_final, meta_copy, dg_response_time), loop
                                 )
                     except Exception as e:
                         print(f"Deepgram message parse error: {e}")
@@ -51,21 +58,23 @@ class DeepgramProvider(STTProvider):
                 connection.on(EventType.MESSAGE, on_message)
                 connection.on(EventType.ERROR, on_error)
 
-                # start_listening() is blocking — run in a thread
                 listen_thread = threading.Thread(
                     target=connection.start_listening, daemon=True
                 )
                 listen_thread.start()
 
-                # Stream audio chunks to Deepgram
                 while True:
                     try:
-                        chunk = await audio_queue.get()
+                        item = await audio_queue.get()
 
-                        if chunk is None:  # EOF / sender disconnected
+                        if item is None:  # EOF / sender disconnected
                             break
 
-                        connection.send_media(chunk)
+                        audio_data, metadata = item
+                        metadata["deepgram_forwarded_time"] = latency_tracker.get_timestamp_ms()
+                        self.latest_chunk_metadata = metadata
+
+                        connection.send_media(audio_data)
 
                     except Exception as e:
                         print(f"Error sending audio to Deepgram: {e}")
