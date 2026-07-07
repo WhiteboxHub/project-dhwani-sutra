@@ -258,7 +258,6 @@ export default function PushToTalk() {
             setTranscripts((prev) => {
               const existingIdx = prev.findIndex((item) => item.id === data.id);
               if (existingIdx !== -1) {
-                // Update active segment
                 const updated = [...prev];
                 updated[existingIdx] = {
                   ...updated[existingIdx],
@@ -267,7 +266,6 @@ export default function PushToTalk() {
                 };
                 return updated;
               } else {
-                // Append new segment
                 return [
                   ...prev,
                   {
