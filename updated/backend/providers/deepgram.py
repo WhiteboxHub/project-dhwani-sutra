@@ -7,6 +7,7 @@ from .base import STTProvider
 from latency_logger import latency_tracker
 
 
+
 class DeepgramProvider(STTProvider):
     def __init__(self, api_key: str = None):
         key = api_key or os.getenv("DEEPGRAM_API_KEY")
