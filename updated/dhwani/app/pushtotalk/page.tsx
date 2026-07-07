@@ -2,12 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import toast, { Toaster } from "react-hot-toast";
-
 type TranscriptItem = {
   id: string | number;
   text: string;
   isCleaned: boolean;
-  isFinal: boolean;
 };
 
 export default function PushToTalk() {
@@ -15,8 +13,6 @@ export default function PushToTalk() {
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const chunkIndexRef = useRef(0);
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const [isRecording, setIsRecording] = useState(false);
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
@@ -46,6 +42,7 @@ export default function PushToTalk() {
       toast.success("Keys Loaded");
     }
 
+
     return () => {
       cleanupAll();
     };
@@ -64,17 +61,13 @@ export default function PushToTalk() {
     setOpenAiKey("");
     setDeepgramKey("");
     toast.success("Keys Inserted");
-  };
+  }
+
 
   const cleanupAll = () => {
     if (recordingIntervalRef.current) {
       clearInterval(recordingIntervalRef.current);
       recordingIntervalRef.current = null;
-    }
-
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
     }
 
     if (
@@ -121,6 +114,8 @@ export default function PushToTalk() {
 
     if (socketRef.current.readyState !== WebSocket.OPEN) return;
 
+    // Guard: if stream tracks have been stopped (e.g. cleanup ran), bail out
+    // This prevents the MediaRecorder NotSupportedError crash
     const tracks = streamRef.current.getTracks();
     if (tracks.length === 0 || tracks.some((t) => t.readyState === "ended")) return;
 
@@ -139,22 +134,11 @@ export default function PushToTalk() {
         chunks.length > 0 &&
         socketRef.current?.readyState === WebSocket.OPEN
       ) {
-        chunkIndexRef.current += 1;
-        const audioCreated = performance.timeOrigin + performance.now();
         const blob = new Blob(chunks, {
           type: "audio/webm;codecs=opus",
         });
 
         const buffer = await blob.arrayBuffer();
-        const audioSent = performance.timeOrigin + performance.now();
-
-        socketRef.current.send(JSON.stringify({
-          type: "chunk_metadata",
-          chunk_index: chunkIndexRef.current,
-          audio_created_time: audioCreated,
-          audio_sent_time: audioSent
-        }));
-        
         socketRef.current.send(buffer);
       }
     };
@@ -170,6 +154,7 @@ export default function PushToTalk() {
   const startRecording = async () => {
     if (isRecording) return;
 
+    // Validate both keys
     if (!savedDeepgramKey.trim() || !savedOpenAiKey.trim()) {
       alert("Please enter both OpenAI key and Deepgram key");
       return;
@@ -188,12 +173,9 @@ export default function PushToTalk() {
 
       streamRef.current = stream;
 
-      const backendBase = process.env.NEXT_PUBLIC_BACKEND_URL || "127.0.0.1:8000";
-      const protocol = backendBase.includes("://") ? (backendBase.startsWith("https") ? "wss" : "ws") : "ws";
-      const rawHost = backendBase.replace(/^https?:\/\//, "").replace(/^wss?:\/\//, "");
-
+      // Send BOTH keys always
       const socket = new WebSocket(
-        `${protocol}://${rawHost}/ws/stt/${sessionId}?provider=${provider}&openai_key=${encodeURIComponent(
+        `ws://127.0.0.1:8000/ws/stt/${sessionId}?provider=${provider}&openai_key=${encodeURIComponent(
           savedOpenAiKey.trim()
         )}&deepgram_key=${encodeURIComponent(savedDeepgramKey.trim())}`
       );
@@ -203,22 +185,13 @@ export default function PushToTalk() {
       socket.onopen = () => {
         setStatus("Connected - Recording...");
 
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "ping" }));
-          }
-        }, 30000);
-
         if (provider === "openai") {
-          chunkIndexRef.current = 0;
           startRecordingChunk();
 
           recordingIntervalRef.current = setInterval(() => {
             startRecordingChunk();
           }, CHUNK_DURATION);
         } else {
-          chunkIndexRef.current = 0;
-          let localChunkIndex = 0;
           const recorder = new MediaRecorder(stream, {
             mimeType: "audio/webm;codecs=opus",
           });
@@ -228,19 +201,7 @@ export default function PushToTalk() {
               event.data.size > 0 &&
               socket.readyState === WebSocket.OPEN
             ) {
-              const audioCreated = performance.timeOrigin + performance.now();
-              localChunkIndex++;
-              chunkIndexRef.current = localChunkIndex;
               const buffer = await event.data.arrayBuffer();
-              const audioSent = performance.timeOrigin + performance.now();
-
-              socket.send(JSON.stringify({
-                type: "chunk_metadata",
-                chunk_index: localChunkIndex,
-                audio_created_time: audioCreated,
-                audio_sent_time: audioSent
-              }));
-              
               socket.send(buffer);
             }
           };
@@ -255,31 +216,17 @@ export default function PushToTalk() {
           const data = JSON.parse(event.data);
 
           if (data.type === "transcript_raw") {
-            setTranscripts((prev) => {
-              const existingIdx = prev.findIndex((item) => item.id === data.id);
-              if (existingIdx !== -1) {
-                const updated = [...prev];
-                updated[existingIdx] = {
-                  ...updated[existingIdx],
-                  text: data.text,
-                  isFinal: data.is_final
-                };
-                return updated;
-              } else {
-                return [
-                  ...prev,
-                  {
-                    id: data.id,
-                    text: data.text,
-                    isCleaned: false,
-                    isFinal: data.is_final
-                  }
-                ];
-              }
-            });
+            setTranscripts((prev) => [
+              ...prev,
+              {
+                id: data.id,
+                text: data.text,
+                isCleaned: false,
+              },
+            ]);
 
             setLatestText(data.text);
-            setStatus(data.is_final ? "Transcript Finalized" : "Streaming...");
+            setStatus("Transcript Received");
           }
 
           if (data.type === "transcript_cleaned") {
@@ -287,14 +234,16 @@ export default function PushToTalk() {
               prev.map((item) =>
                 item.id === data.id
                   ? {
-                      ...item,
-                      text: data.text,
-                      isCleaned: true
-                    }
+                    ...item,
+                    text: data.text,
+                    isCleaned: true,
+                  }
                   : item
               )
             );
 
+            // Only update latestText if the cleaned result is non-empty
+            // (empty means the backend flagged it as silence/hallucination)
             if (data.text) setLatestText(data.text);
             setStatus("Transcript Cleaned");
           }
@@ -303,7 +252,7 @@ export default function PushToTalk() {
             setStatus("Server Error");
           }
         } catch {
-          // Ignore parsing errors for control frames
+          setStatus("Invalid Response");
         }
       };
 
@@ -344,6 +293,7 @@ export default function PushToTalk() {
 
   const copyTranscript = async () => {
     const fullText = transcripts.map((item) => item.text).join(" ");
+
     await navigator.clipboard.writeText(fullText);
     alert("Transcript copied.");
   };
@@ -385,6 +335,8 @@ export default function PushToTalk() {
           >
             Clear Keys
           </button>
+
+
         </div>
 
         <div className="bg-gray-800 p-5 rounded-xl border border-gray-700 space-y-4">
@@ -460,10 +412,8 @@ export default function PushToTalk() {
                   <div
                     className={
                       item.isCleaned
-                        ? "text-white font-normal"
-                        : item.isFinal
-                        ? "text-gray-300 font-medium"
-                        : "text-gray-500 italic animate-pulse"
+                        ? "text-white"
+                        : "text-gray-400 italic"
                     }
                   >
                     {item.text}
@@ -474,7 +424,6 @@ export default function PushToTalk() {
           </div>
         )}
       </div>
-      <Toaster position="bottom-right" />
     </main>
   );
 }
