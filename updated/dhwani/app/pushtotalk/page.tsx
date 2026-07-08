@@ -300,7 +300,8 @@ export default function PushToTalk() {
           }
 
           if (data.type === "error") {
-            setStatus("Server Error");
+            setStatus(`⚠️ Error: ${data.message || 'Server Error'}`);
+            toast.error(data.message || "An error occurred on the server");
           }
         } catch {
           // Ignore parsing errors for control frames
