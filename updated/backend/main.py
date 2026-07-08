@@ -224,7 +224,15 @@ async def websocket_stt(
                     # 3. Optional GPT Connection
                     if gpt_needed:
                         gpt_started = latency_tracker.get_timestamp_ms()
-                        gpt_cleaned = await llm_cleaning(history, normalized_val)
+                        try:
+                            gpt_cleaned = await llm_cleaning(history, normalized_val)
+                        except Exception as e:
+                            print(f"🔴 [CRITICAL] OpenAI API Key Error or Quota Exceeded: {e}")
+                            await safe_send(websocket, {
+                                "type": "error",
+                                "message": f"OpenAI API Key expired or has insufficient quota: {e}"
+                            })
+                            gpt_cleaned = normalized_val
                         gpt_completed = latency_tracker.get_timestamp_ms()
 
                         if gpt_cleaned == "[SILENCE]":
@@ -273,8 +281,18 @@ async def websocket_stt(
         try:
             await stt_provider_instance.process_audio_stream(audio_queue, handler_callback)
         except Exception as e:
-            print(f"  Provider error: {e}")
-            latency_tracker.log_error(session_id, "STT Provider Loop", str(e), active_metadata.get("chunk_index", 0))
+            err_msg = str(e)
+            print(f"  Provider error: {err_msg}")
+            latency_tracker.log_error(session_id, "STT Provider Loop", err_msg, active_metadata.get("chunk_index", 0))
+            
+            user_friendly_error = f"STT Provider error: {err_msg}"
+            if "unauthorized" in err_msg.lower() or "authentication" in err_msg.lower() or "401" in err_msg:
+                user_friendly_error = "Deepgram API key is invalid or has expired."
+            
+            await safe_send(websocket, {
+                "type": "error",
+                "message": user_friendly_error
+            })
 
     # Create tasks for receiving and processing
     receive_task = asyncio.create_task(receive_audio())
