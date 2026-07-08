@@ -117,7 +117,10 @@ async def llm_cleaning(context: str, current_text: str) -> str:
             return cleaned.strip()
         return current_text
 
-    except Exception:
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "api_key" in err_msg or "unauthorized" in err_msg or "401" in err_msg or "quota" in err_msg or "rate limit" in err_msg:
+            raise e
         return current_text
 
 def validate_similarity(original: str, corrected: str) -> bool:
