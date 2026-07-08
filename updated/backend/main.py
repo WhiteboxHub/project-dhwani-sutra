@@ -179,95 +179,111 @@ async def websocket_stt(
         if not dg_response_time:
             dg_response_time = latency_tracker.get_timestamp_ms()
 
-        # Send raw text immediately (either interim or final raw)
-        msg_raw = {
-            "type": "transcript_raw",
-            "id": segment_id,
-            "text": raw_text,
-            "is_final": is_final
-        }
+        if not is_final:
+            # ── STREAMING PATH ──────────────────────────────────────────────
+            # Send interim text live while user is speaking — no processing
+            msg_interim = {
+                "type": "transcript_raw",
+                "id": segment_id,
+                "text": raw_text,
+                "is_final": False
+            }
+            await safe_send(websocket, msg_interim)
+            await manager.broadcast_to_session(session_id, msg_interim)
 
-        # Send raw text to front-end sender
-        await safe_send(websocket, msg_raw)
-        # Broadcast to any active listeners
-        await manager.broadcast_to_session(session_id, msg_raw)
-
-        # Pipeline 2: Finalization Pipeline (only on is_final=True)
-        if is_final:
+        else:
+            # ── FINAL PATH ──────────────────────────────────────────────────
             print(f"  Final raw transcript [{session_id}]: {raw_text}")
-            
+
             # Context window update
             raw_transcript_history = (raw_transcript_history + " " + raw_text)[-2000:]
-            
+
             # Record start timestamps for instrumentation
             latency_tracker.record_segment_start(segment_id, chunk_metadata, dg_response_time)
 
             # Reset active segment ID for the next sentence
             active_segment_id = None
 
-            async def finalize_and_send(text_to_finalize: str, history: str, sid: str):
-                try:
-                    # 1. Technical Dictionary Normalization
-                    dict_start = latency_tracker.get_timestamp_ms()
-                    normalized_val, dict_modified = normalize_text(text_to_finalize)
-                    dict_end = latency_tracker.get_timestamp_ms()
+            def clean_artifacts(text: str) -> str:
+                if not text or text == "[SILENCE]":
+                    return text
+                text = text.replace(". and", ", and")
+                text = text.replace(". And", ", and")
+                text = text.replace(" .", ".")
+                text = text.replace(" ,", ",")
+                return text
 
-                    # 2. Validation Layer / Decision Engine
+            # Step 1: Normalize instantly (<1ms) — no API call
+            dict_start = latency_tracker.get_timestamp_ms()
+            normalized_val, _ = normalize_text(raw_text)
+            dict_end = latency_tracker.get_timestamp_ms()
+            immediate_val = clean_artifacts(normalized_val)
+
+            # Step 2: Send transcript_cleaned IMMEDIATELY
+            # isCleaned=True right away → zero spinner, zero wait
+            msg_cleaned = {
+                "type": "transcript_cleaned",
+                "id": segment_id,
+                "text": immediate_val
+            }
+            await safe_send(websocket, msg_cleaned)
+            await manager.broadcast_to_session(session_id, msg_cleaned)
+            print(f"⚡ Instant final [{segment_id[:8]}]: {immediate_val}")
+
+            # Step 3: GPT enhancement runs as a detached background task
+            # User sees the normalized text immediately — GPT silently updates
+            # if and only if it produces a meaningfully better result
+            async def gpt_enhance_background(text_to_finalize: str, history: str, sid: str,
+                                             norm: str, immediate: str,
+                                             d_start: float, d_end: float):
+                try:
                     val_start = latency_tracker.get_timestamp_ms()
-                    gpt_needed = should_invoke_gpt(text_to_finalize, normalized_val)
+                    gpt_needed = should_invoke_gpt(text_to_finalize, norm)
                     val_end = latency_tracker.get_timestamp_ms()
 
                     gpt_started = 0.0
                     gpt_completed = 0.0
-                    final_val = normalized_val
 
-                    # 3. Optional GPT Connection
                     if gpt_needed:
+                        print(f"🤖 GPT enhancing in background [{sid[:8]}]...")
                         gpt_started = latency_tracker.get_timestamp_ms()
-                        gpt_cleaned = await llm_cleaning(history, normalized_val)
+                        gpt_cleaned = await llm_cleaning(history, norm)
                         gpt_completed = latency_tracker.get_timestamp_ms()
 
-                        if gpt_cleaned == "[SILENCE]":
-                            final_val = text_to_finalize
-                        else:
-                            # 4. Similarity Validation
-                            if validate_similarity(normalized_val, gpt_cleaned):
-                                final_val = gpt_cleaned
+                        if gpt_cleaned and gpt_cleaned != "[SILENCE]":
+                            gpt_val = clean_artifacts(gpt_cleaned)
+                            if validate_similarity(norm, gpt_cleaned) and gpt_val != immediate:
+                                # Silently replace text — no spinner was ever shown
+                                msg_gpt = {
+                                    "type": "transcript_cleaned",
+                                    "id": sid,
+                                    "text": gpt_val
+                                }
+                                await safe_send(websocket, msg_gpt)
+                                await manager.broadcast_to_session(session_id, msg_gpt)
+                                print(f"✨ GPT silently improved [{sid[:8]}]: {gpt_val}")
                             else:
-                                print(f"⚠️ Similarity check failed. Using normalized text instead of GPT.")
-                                final_val = normalized_val
+                                print(f"⚡ GPT unchanged, keeping normalized [{sid[:8]}]")
+                        else:
+                            print(f"⚡ GPT empty/silence, keeping normalized [{sid[:8]}]")
                     else:
-                        print(f"⚡ Skipping GPT call (normalized text is clean and matches criteria)")
+                        gpt_needed = False
+                        print(f"⚡ GPT skipped (already clean) [{sid[:8]}]")
 
-                    # Clean grammatical artifacts if needed
-                    if final_val and final_val != "[SILENCE]":
-                        final_val = final_val.replace(". and", ", and")
-                        final_val = final_val.replace(". And", ", and")
-                        final_val = final_val.replace(" .", ".")
-                        final_val = final_val.replace(" ,", ",")
-
-                    msg_cleaned = {
-                        "type": "transcript_cleaned",
-                        "id": sid,
-                        "text": final_val
-                    }
-
-                    # Send to clients
-                    await safe_send(websocket, msg_cleaned)
-                    await manager.broadcast_to_session(session_id, msg_cleaned)
-
-                    # Log latency telemetry
                     broadcast_sent = latency_tracker.get_timestamp_ms()
                     latency_tracker.record_pipeline_metrics(
-                        sid, dict_start, dict_end, val_start, val_end,
+                        sid, d_start, d_end, val_start, val_end,
                         gpt_started, gpt_completed, gpt_needed, broadcast_sent
                     )
-
                 except Exception as e:
-                    print(f"  Error in finalization pipeline: {e}")
-                    latency_tracker.log_error(session_id, "Finalization Pipeline", str(e), chunk_metadata.get("chunk_index", 0))
+                    print(f"  GPT background error [{sid[:8]}]: {e}")
+                    latency_tracker.log_error(session_id, "GPT Background", str(e), chunk_metadata.get("chunk_index", 0))
 
-            asyncio.create_task(finalize_and_send(raw_text, raw_transcript_history, segment_id))
+            asyncio.create_task(gpt_enhance_background(
+                raw_text, raw_transcript_history, segment_id,
+                normalized_val, immediate_val,
+                dict_start, dict_end
+            ))
 
     async def run_provider():
         try:
