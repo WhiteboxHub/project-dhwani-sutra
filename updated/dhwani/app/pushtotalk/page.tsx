@@ -245,7 +245,7 @@ export default function PushToTalk() {
             }
           };
 
-          recorder.start(250);
+          recorder.start(150);
           mediaRecorderRef.current = recorder;
         }
       };
