@@ -26,7 +26,7 @@ class DeepgramProvider(STTProvider):
                 model="nova-3",
                 punctuate=True,
                 interim_results=True,
-                endpointing=500,
+                endpointing=300,
                 language="en",
                 keyterm=["LangChain", "LangGraph", "land graph", "Landra", "MilvusDB", "BM25", "Agentic AI", "Agentic", "RAG", "Prometheus", "Grafana", "CloudWatch"]
             ) as connection:
